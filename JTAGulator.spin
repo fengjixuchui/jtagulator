@@ -47,7 +47,7 @@ CON
   MAX_LEN_CMD = 12   ' Maximum length of command string buffer
   
   ' JTAG/IEEE 1149.1
-  MAX_TCK_SPEED = 22   ' Maximum allowable JTAG clock speed (kHz)
+  MAX_TCK_SPEED = 20   ' Maximum allowable JTAG clock speed (kHz)
    
   ' UART/Asynchronous Serial
   MAX_LEN_UART_USER     = 34   ' Maximum length of user input string buffer (accounts for hexadecimal input of 16 bytes, \x00112233445566778899AABBCCDDEEFF)
@@ -59,6 +59,7 @@ CON
   MENU_JTAG     = 1    ' JTAG
   MENU_UART     = 2    ' UART
   MENU_GPIO     = 3    ' General Purpose I/O
+  MENU_SWD      = 4    ' Serial Wire Debug (SWD)
    
   
 VAR                   ' Globally accessible variables
@@ -71,8 +72,6 @@ VAR                   ' Globally accessible variables
   long jTMS
   long jTRST
   long jTCKSpeed      ' Selectable JTAG clock speed
-  long jIR            ' Most recent instruction (IR) and data (DR) for OPCODE_Known
-  long jDR
   long jPinsLow       ' Parameters for IDCODE_Scan, BYPASS_Scan
   long jPinsLowDelay
   long jPinsHighDelay
@@ -94,7 +93,12 @@ VAR                   ' Globally accessible variables
   long uStack[50]     ' Stack space for passthrough cog
 
   long gWriteValue    ' Parameter for Write_IO_Pins
-  
+ 
+  long swdClk         ' SWD pins (must stay in this order)
+  long swdIo
+  long swdPinsKnown   ' Are above pins valid?
+  long swdFrequency
+   
   long chStart        ' Channel range for the current scan (specified by the user)
   long chEnd
   
@@ -105,11 +109,13 @@ OBJ
   g             : "JTAGulatorCon"     ' JTAGulator global constants
   u             : "JTAGulatorUtil"    ' JTAGulator general purpose utilities
   pst           : "PropSerial"        ' Serial communication for user interface (modified version of built-in Parallax Serial Terminal)
+  str           : "jm_strings"        ' String manipulation methods (JonnyMac)
   rr            : "RealRandom"        ' Random number generation (Chip Gracey, http://obex.parallax.com/object/498) 
-  jtag          : "PropJTAG"          ' JTAG/IEEE 1149.1 low-level functions
+  jtag          : "PropJTAG"          ' JTAG/IEEE 1149.1 low-level methods
   uart          : "JDCogSerial"       ' UART/Asynchronous Serial communication engine (Carl Jacobs, http://obex.parallax.com/object/298)
   pt_in         : "jm_rxserial"       ' UART/Asynchronous Serial receive driver for passthrough (JonnyMac, https://forums.parallax.com/discussion/114492/prop-baudrates)
   pt_out        : "jm_txserial"       ' UART/Asynchronous Serial transmit driver for passthrough (JonnyMac, https://forums.parallax.com/discussion/114492/prop-baudrates)
+  swd           : "SWDHost"           ' ARM SWD (Serial Wire Debug) low-level functions (Adam Green, https://github.com/adamgreen)  
     
   
 PUB main | cmd
@@ -117,6 +123,7 @@ PUB main | cmd
   JTAG_Init                     ' Initialize JTAG-specific items
   UART_Init                     ' Initialize UART-specific items
   GPIO_Init                     ' Initialize GPIO-specific items
+  SWD_Init                      ' Initialize SWD-specific items
 
   pst.CharIn                    ' Wait until the user presses a key before getting started
   pst.Str(@InitHeader)          ' Display header
@@ -145,6 +152,9 @@ PUB main | cmd
 
         MENU_GPIO:                    ' General Purpose I/O
           Do_GPIO_Menu(cmd)
+          
+        MENU_SWD:                     ' Serial Wire Debug
+          Do_SWD_Menu(cmd)
 
         other:
           idMenu := MENU_MAIN
@@ -166,6 +176,9 @@ PRI Do_Main_Menu(cmd)
 
     "G", "g":                 ' Switch to GPIO submenu
       idMenu := MENU_GPIO
+
+    "S", "s":                 ' Switch to SWD submenu
+      idMenu := MENU_SWD
 
     "V", "v":                 ' Set target I/O voltage
       Set_Target_IO_Voltage
@@ -211,12 +224,6 @@ PRI Do_JTAG_Menu(cmd)
         pst.Str(@ErrTargetIOVoltage)
       else
         OPCODE_Discovery
-
-    "X", "x":                 ' Transfer instruction/data (Pinout already known, requires single device in the chain)
-      if (vTargetIO == -1)
-        pst.Str(@ErrTargetIOVoltage)
-      else
-        OPCODE_Known
 
     "C", "c":                ' Set JTAG clock speed
       Set_JTAG_Clock
@@ -273,6 +280,27 @@ PRI Do_GPIO_Menu(cmd)
       Do_Shared_Menu(cmd)
 
 
+PRI Do_SWD_Menu(cmd)
+  case cmd
+    "I", "i":                 ' Identify SWD pinout (IDCODE Scan)
+      if (vTargetIO == -1)
+        pst.Str(@ErrTargetIOVoltage)
+      else
+        SWD_IDCODE_Scan
+
+    "D", "d":                 ' Get SWD Device ID (Pinout already known)
+      if (vTargetIO == -1)
+        pst.Str(@ErrTargetIOVoltage)
+      else
+        SWD_IDCODE_Known
+        
+    "C", "c":
+      Set_SWD_Frequency       ' Set SWD clock speed
+
+    other:
+      Do_Shared_Menu(cmd)
+                  
+
 PRI Do_Shared_Menu(cmd)
   case cmd
     "V", "v":                 ' Set target I/O voltage
@@ -301,6 +329,9 @@ PRI Display_Menu_Text
 
     MENU_GPIO:
       pst.Str(@MenuGPIO)
+      
+    MENU_SWD:
+      pst.Str(@MenuSWD)
 
   if (idMenu <> MENU_MAIN)
     pst.Str(@MenuShared)
@@ -320,6 +351,9 @@ PRI Display_Command_Prompt
 
     MENU_GPIO:             ' General Purpose I/O
       pst.Str(String("GPIO"))
+      
+    MENU_SWD:              ' Serial Wire Debug
+      pst.Str(String("SWD"))
 
     other:
       idMenu := MENU_MAIN
@@ -450,7 +484,7 @@ PRI IDCODE_Scan | value, value_new, ctr, num, id[32 {jtag#MAX_DEVICES_LEN}], i, 
     pst.Str(@ErrNoDeviceFound)  
   JTAG_Scan_Cleanup(num, 0, xtdo, xtck, xtms)  ' TDI isn't used during an IDCODE Scan
   
-  pst.Str(String(CR, LF, "IDCODE scan complete."))
+  pst.Str(@MsgIDCODEComplete)
 
          
 PRI BYPASS_Scan | value, value_new, ctr, num, data_in, data_out, xtdi, xtdo, xtck, xtms, tdiStart, tdiEnd, tdoStart, tdoEnd, tckStart, tckEnd, tmsStart, tmsEnd    ' Identify JTAG pinout (BYPASS Scan)
@@ -633,7 +667,7 @@ PRI IDCODE_Known | value, id[32 {jtag#MAX_DEVICES_LEN}], i, xtdi   ' Get JTAG De
     pst.Str(@ErrNoDeviceFound)
          
   jTDI := xtdi   ' Set TDI back to its current value, if it exists (it was set to a temporary pin value to avoid contention)
-  pst.Str(String(CR, LF, "IDCODE listing complete."))
+  pst.Str(@MsgIDCODEDisplayComplete)
 
 
 PRI BYPASS_Known | num, dataIn, dataOut   ' Test BYPASS (TDI to TDO) (Pinout already known)
@@ -751,105 +785,6 @@ PRI OPCODE_Discovery | num, ctr, irLen, drLen, opcode_max, opcodeH, opcodeL, opc
 
   jtag.Restore_Idle   ' Reset JTAG TAP to Run-Test-Idle state
   pst.Str(String(CR, LF, "IR/DR discovery complete."))
-    
-
-PRI OPCODE_Known | num, irLen, drLen, xir, xdr, data, i   ' Transfer instruction/data (Pinout already known, requires single device in the chain)
-  if (Set_JTAG(1) == -1)  ' Ask user for the known JTAG pinout
-    return                  ' Abort if error
-  
-  u.TXSEnable                                 ' Enable level shifter outputs
-  u.Set_Pins_High(0, g#MAX_CHAN)              ' In case there is a signal on the target that needs to be held HIGH, like TRST# or SRST#
-  jtag.Config(jTDI, jTDO, jTCK, jTMS, jTCKSpeed)         ' Configure JTAG
-
-  num := jtag.Detect_Devices                  ' Get number of devices in the chain
-  if (num == 0)
-    pst.Str(@ErrNoDeviceFound)
-    return
-  elseif (num > 1)
-    pst.Str(String(CR, LF, "Too many devices in the chain!"))
-    return 
-  pst.Str(String(CR, LF))
-  
-  irLen := jtag.Detect_IR_Length              ' Get instruction register length
-  pst.Str(String("Instruction Register (IR) length: "))
-  if (irLen == 0)
-    pst.Str(String("N/A"))
-    pst.Str(@ErrOutOfRange)
-    return
-  else
-    pst.Dec(irLen)
-                  
-  pst.Str(String(CR, LF, "Enter instruction/opcode to send (in hex) ["))   ' Receive instruction/opcode from the user
-  pst.Hex(jIR, Round_Up(irLen) >> 2)
-  pst.Str(String("]: ")) 
-  ' Receive hexadecimal value from the user and perform input sanitization
-  ' This has do be done directly in the object since we may need to handle user input up to 32 bits
-  pst.StrInMax(@vCmd,  MAX_LEN_CMD)
-  if (vCmd[0]==0)   ' If carriage return was pressed...          
-    xir := jIR & Bits_To_Value(irLen)    ' Keep current setting, but adjust for a possible change in IR length
-  else
-    if strsize(@vCmd) > (Round_Up(irLen) >> 2)  ' If value is larger than the actual IR length
-      pst.Str(@ErrOutOfRange)
-      return
-    ' Make sure each character in the string is hexadecimal ("0"-"9","A"-"F","a"-"f")
-    repeat i from 0 to strsize(@vCmd)-1
-      data := vCmd[i]
-      data := -15 + --data & %11011111 + 39*(data > 56)   ' Borrowed from the Parallax Serial Terminal (PST) StrToBase method     
-      if (data < 0) or (data => 16)
-        pst.Str(@ErrOutOfRange)
-        return
-    xir := pst.StrToBase(@vCmd, 16)   ' Convert valid string into actual value
-  jIR := xir   ' Update global with new value
-
-  drLen := jtag.Detect_DR_Length(xir)         ' Get data register length
-  pst.Str(String(CR, LF, "Data Register (DR) length: "))
-  if (drLen == 0)
-    pst.Str(String("N/A"))
-    pst.Str(@ErrOutOfRange)
-    return
-  else
-    pst.Dec(drLen)
-
-  if (drLen > 32)
-    pst.Str(String(CR, LF, "Data input limited to 32 bits!"))
-    drLen := 32
-    
-  pst.Str(String(CR, LF, "Enter data to send (in hex) ["))               ' Receive data from the user
-  pst.Hex(jDR, Round_Up(drLen) >> 2)
-  pst.Str(String("]: ")) 
-  ' Receive hexadecimal value from the user and perform input sanitization
-  ' This has do be done directly in the object since we may need to handle user input up to 32 bits
-  pst.StrInMax(@vCmd,  MAX_LEN_CMD)
-  if (vCmd[0]==0)   ' If carriage return was pressed...          
-    xdr := jDR & Bits_To_Value(drLen)    ' Keep current setting, but adjust for a possible change in DR length
-  else
-    if strsize(@vCmd) > (Round_Up(drLen) >> 2)  ' If value is larger than the actual DR length
-      pst.Str(@ErrOutOfRange)
-      return
-    ' Make sure each character in the string is hexadecimal ("0"-"9","A"-"F","a"-"f")
-    repeat i from 0 to strsize(@vCmd)-1
-      data := vCmd[i]
-      data := -15 + --data & %11011111 + 39*(data > 56)   ' Borrowed from the Parallax Serial Terminal (PST) StrToBase method     
-      if (data < 0) or (data => 16)
-        pst.Str(@ErrOutOfRange)
-        return
-    xdr := pst.StrToBase(@vCmd, 16)   ' Convert valid string into actual value
-  jDR := xdr   ' Update global with new value
-
-  jtag.Send_Instruction(xir, irLen)       ' Send instruction/opcode
-  data := jtag.Send_Data(xdr, drLen)      ' Shift data into DR and receive result from prior instruction via TDO
-  data ><= drLen                          ' Bitwise reverse since LSB came in first (we want MSB to be first)
-              
-  ' Display received value
-  pst.Str(String(CR, LF, "Data received: "))
-   
-  ' ...as binary characters (0/1)
-  Display_Binary(data, drLen)
- 
-  ' ...as hexadecimal
-  pst.Str(String("(0x"))
-  pst.Hex(data, Round_Up(drLen) >> 2) 
-  pst.Str(String(")"))
 
   
 PRI Set_JTAG(getTDI) : err | xtdi, xtdo, xtck, xtms, buf, c     ' Set JTAG configuration to known values
@@ -1155,7 +1090,7 @@ PRI UART_Scan | value, baud_idx, i, j, ctr, num, display, xstr[MAX_LEN_UART_USER
   
   if (i <> 0)              ' If input was anything other than a CR
     ' Make sure each character in the string is printable ASCII
-    repeat j from 0 to (i-1)
+    repeat j from 0 to (i - 1)
       if (byte[@xstr][j] < $20) or (byte[@xstr][j] > $7E)
         pst.Str(@ErrOutOfRange)  ' If the string contains invalid (non-printable) characters, abort
         return
@@ -1166,24 +1101,21 @@ PRI UART_Scan | value, baud_idx, i, j, ctr, num, display, xstr[MAX_LEN_UART_USER
         pst.Str(@ErrOutOfRange) 
         return    
 
-      ' Make sure each character in the string is hexadecimal ("0"-"9","A"-"F","a"-"f") after the \x escape sequence
-      repeat j from 0 to (i-3)
-        value := byte[@xstr+2][j]
-        value := -15 + --value & %11011111 + 39*(value > 56)   ' Borrowed from the Parallax Serial Terminal (PST) StrToBase method     
-        if (value < 0) or (value => 16)
-          pst.Str(@ErrOutOfRange)
-          return
-
       ' Make sure string is a series of complete bytes (no nibbles), should contain an even number of characters
       if (i // 2 <> 0)
          pst.Str(@ErrOutOfRange)
          return
+                 
+      ' Make sure each character in the string is hexadecimal ("0"-"9","A"-"F","a"-"f") after the \x escape sequence
+      if (str.is_hex(@xstr + 2) == false)
+        pst.Str(@ErrOutOfRange)
+        return
         
       ' Populate the uSTR global with up to MAX_LEN_UART_TX bytes
       ' uHex will contain the number of bytes in the string (used later as a counter to transmit the data)
       uHex := 0
       repeat j from 0 to (i - 3) step 2  ' look at two characters at a time in order to form one hex byte 
-        byte[@uSTR][uHex] := hex2dec(@xstr + 2 + j, 2)
+        byte[@uSTR][uHex] := str.hex2dec(@xstr + 2 + j, 2)
         uHex++
       
     else  ' Otherwise, we are dealing with an ASCII string
@@ -1241,10 +1173,10 @@ PRI UART_Scan | value, baud_idx, i, j, ctr, num, display, xstr[MAX_LEN_UART_USER
           pst.Str(@ErrUARTAborted)
           return
         uBaud := BaudRate[baud_idx]        ' Store current baud rate into uBaud variable
-          
+                
         UART.Start(|<uTXD, |<uRXD, uBaud)  ' Configure UART
         UART.RxFlush                       ' Flush receive buffer
-
+          
         if (uHex == 0)                     ' If the user string is ASCII
           UART.str(@uSTR)                    ' Send string to target
           UART.tx(CR)                        ' Send carriage return to target
@@ -1722,14 +1654,13 @@ PRI Write_IO_Pins : err | value, i, data     ' Write all channels (output)
     if strsize(@vCmd) > (g#MAX_CHAN >> 2)  ' If value is larger than the our number of channels
       pst.Str(@ErrOutOfRange)
       return -1
-    ' Make sure each character in the string is hexadecimal ("0"-"9","A"-"F","a"-"f")
-    repeat i from 0 to strsize(@vCmd)-1
-      data := vCmd[i]
-      data := -15 + --data & %11011111 + 39*(data > 56)   ' Borrowed from the Parallax Serial Terminal (PST) StrToBase method     
-      if (data < 0) or (data => 16)
-        pst.Str(@ErrOutOfRange)
-        return -1
+      
+    if (str.is_hex(@vCmd) == false)  ' Make sure each character in the string is hexadecimal ("0"-"9","A"-"F","a"-"f")
+      pst.Str(@ErrOutOfRange)
+      return -1
+      
     value := pst.StrToBase(@vCmd, 16)   ' Convert valid string into actual value
+    
   gWriteValue := value   ' Update global with new value
  
   u.TXSEnable                       ' Enable level shifter outputs
@@ -1756,8 +1687,194 @@ PRI Display_IO_Pins(value) | count
   pst.Str(String(" (0x"))
   pst.Hex(value, g#MAX_CHAN >> 2)
   pst.Str(String(")"))
-
   
+       
+CON {{ SWD METHODS }}
+
+PRI SWD_Init
+  ' Don't know any SWD pins yet.                        
+  swdPinsKnown := 0
+  swdClk := 0
+  swdIo := 0
+  swdFrequency := swd#SWD_DEFAULT_CLOCK_RATE
+
+
+PRI SWD_IDCODE_Scan | response, idcode, ctr, num, xclk, xio     ' Identify SWD pinout (IDCODE Scan)
+  if (Get_Channels(2) == -1)   ' Get the channel range to use
+    return
+  Display_Permutations((chEnd - chStart + 1), 2)  ' SWCLK, SWDIO
+
+  if (Get_Settings == -1)      ' Get configurable scan settings
+    return
+    
+  pst.Str(@MsgPressSpacebarToBegin)
+  if (pst.CharIn <> " ")
+    pst.Str(@ErrIDCODEAborted)
+    return
+
+  pst.Str(@MsgJTAGulating)
+  u.TXSEnable   ' Enable level shifter outputs
+  if (jPinsLow == 1)
+    u.Set_Pins_Low(chStart, chEnd)  ' Set current channel range to output LOW
+    u.Pause(jPinsLowDelay)          ' Delay to stay asserted
+         
+  swd.init      ' Initialize SWD host module
+  num := 0      ' Counter of possibly good pinouts
+  ctr := 0      ' Counter of total loop iterataions.
+  repeat swdClk from chStart to chEnd   ' For every possible pin permutation
+    repeat swdIo from chStart to chEnd
+      if (swdIo == swdClk)
+        next
+
+      if (pst.RxEmpty == 0)  ' Abort scan if any key is pressed
+        SWD_Scan_Cleanup(num, xclk, xio)
+        pst.RxFlush
+        pst.Str(@ErrIDCODEAborted)
+        return
+
+      u.Set_Pins_High(chStart, chEnd)       ' Set current channel range to output HIGH (in case there are active low signals that may affect operation, like SRST#)  
+      if (jPinsLow == 1)
+        u.Pause(jPinsHighDelay)               ' Delay after deassertion before proceeding 
+
+      ' Use this pin mapping with the SWD module to attempt line resetting the device
+      ' and reading out the IDCODE register.
+      swd.config(swdClk, swdIo, swdFrequency)
+      response := swd.resetSwJtagAndReadIdCode(@idcode)
+
+      ' The IDCODE was most likely read out successfully with this pin mapping if
+      ' the response code is OK (%001) and the least significant bit of the returned
+      ' IDCODE is 1 (unless all bits of IDCODE are 1 which isn't valid).
+      if (response == swd#RESP_OK) and (idcode <> -1) and (idcode & 1)
+        Display_SWD_Pins
+        ' Track this most recent detection results.
+        num++
+        xclk := swdClk
+        xio := swdIo
+        Display_Device_ID(idcode, 1, 0)     ' SWD doesn't support device chaining, so there will only be a single device per pin permutation
+        pst.Str(String(CR, LF))
+          
+      ' Progress indicator
+      ++ctr
+      if (jPinsLow == 0)
+        Display_Progress(ctr, 30)
+      else
+        Display_Progress(ctr, 1) 
+        u.Set_Pins_Low(chStart, chEnd)  ' Set current channel range to output LOW
+        u.Pause(jPinsLowDelay)          ' Delay to stay asserted
+
+  if (num == 0)
+    pst.Str(@ErrNoDeviceFound)  
+  SWD_Scan_Cleanup(num, xclk, xio)
+  
+  pst.Str(@MsgIDCODEComplete)
+
+
+PRI SWD_IDCODE_Known | response, idcode   ' Get SWD Device ID (Pinout already known)
+  if (Set_SWD == -1)  ' Ask user for the known SWD pinout
+    return              ' Abort if error
+   
+  u.TXSEnable                                      ' Enable level shifter outputs
+  u.Set_Pins_High(0, g#MAX_CHAN)                   ' In case there is a signal on the target that needs to be held HIGH, like TRST# or SRST#
+
+  swd.init      ' Initialize SWD host module
+  
+  ' SWD doesn't support device chaining, so there will only be a single device per pin permutation
+  ' Use this pin mapping with the SWD module to attempt line resetting the device
+  ' and reading out the IDCODE register.
+  swd.config(swdClk, swdIo, swdFrequency)
+  response := swd.resetSwJtagAndReadIdCode(@idcode)
+      
+  ' The IDCODE was most likely read out successfully with this pin mapping if
+  ' the response code is OK (%001) and the least significant bit of the returned
+  ' IDCODE is 1 (unless all bits of IDCODE are 1 which isn't valid).
+  if (response == swd#RESP_OK) and (idcode <> -1) and (idcode & 1)
+    Display_Device_ID(idcode, 1, 1)   ' Display Device ID (with details)
+  else
+    pst.Str(@ErrNoDeviceFound)
+
+  swd.uninit    ' Cleanup SWD host module
+  pst.Str(@MsgIDCODEDisplayComplete)
+
+
+PRI SWD_Scan_Cleanup(num, clk, io)
+  swd.uninit    ' Cleanup SWD host module
+  if (num == 0)    ' If no device(s) were found during the search
+    longfill(@swdClk, 0, 2)  ' Clear SWD pinout
+    swdPinsKnown := 0 
+  else             ' Update globals with the most recent detection results
+    swdClk := clk
+    swdIo := io
+    swdPinsKnown := 1
+
+    
+PRI Display_SWD_Pins
+  pst.Str(String(CR, LF, "SWDIO: "))
+  pst.Dec(swdIo)
+  pst.Str(String(CR, LF, "SWCLK: "))
+  pst.Dec(swdClk)
+  pst.Str(String(CR, LF))
+
+
+PRI Set_SWD_Frequency | value
+  pst.Str(String(CR, LF, "Current SWD clock speed (Hz): "))
+  pst.Dec(swdFrequency)
+  
+  pst.Str(String(CR, LF, "Enter new SWD clock speed ("))
+  pst.Dec(swd#SWD_SLOW_CLOCK_RATE)
+  pst.Str(String(" - "))
+  pst.Dec(swd#SWD_FASTEST_CLOCK_RATE)
+  pst.Str(String("): "))
+  value := Get_Decimal_Pin  ' Receive decimal value (including 0) 
+    
+  if (value < swd#SWD_SLOW_CLOCK_RATE) or (value > swd#SWD_FASTEST_CLOCK_RATE)
+    pst.Str(@ErrOutOfRange)
+  else
+    swdFrequency := value
+    pst.Str(String(CR, LF, "New SWD clock speed set: "))
+    pst.Dec(swdFrequency)  ' Print a confirmation of newly set clock speed
+
+
+PRI Set_SWD : err | xio, xclk, buf, c     ' Set SWD configuration to known values
+  pst.Str(String(CR, LF, "Enter SWDIO pin ["))
+  pst.Dec(swdIo)             ' Display current value
+  pst.Str(String("]: "))
+  xio := Get_Decimal_Pin     ' Get new value from user
+  if (xio == -1)             ' If carriage return was pressed...      
+    xio := swdIo                ' Keep current setting
+  if (xio < 0) or (xio > g#MAX_CHAN-1)  ' If entered value is out of range, abort
+    pst.Str(@ErrOutOfRange)
+    return -1
+
+  pst.Str(String(CR, LF, "Enter SWCLK pin ["))
+  pst.Dec(swdClk)               ' Display current value
+  pst.Str(String("]: "))
+  xclk := Get_Decimal_Pin     ' Get new value from user
+  if (xclk == -1)             ' If carriage return was pressed...      
+    xclk := swdClk                ' Keep current setting
+  if (xclk < 0) or (xclk > g#MAX_CHAN-1)  ' If entered value is out of range, abort
+    pst.Str(@ErrOutOfRange)
+    return -1
+
+  ' Make sure that the pin numbers are unique
+  ' Set bit in a long corresponding to each pin number
+  buf := 0
+  buf |= (1 << xio)
+  buf |= (1 << xclk)
+  
+  ' Count the number of bits that are set in the long
+  c := 0
+  repeat 32
+    c += (buf & 1)
+    buf >>= 1
+
+  if (c <> 2)         ' If there are not exactly 2 bits set (SWDIO, SWCLK), then we have a collision
+    pst.Str(@ErrPinCollision)
+    return -1
+  else                ' If there are no collisions, update the globals with the new values
+    swdIo := xio
+    swdClk := xclk
+
+      
 CON {{ OTHER METHODS }}
 
 PRI System_Init
@@ -1788,7 +1905,7 @@ PRI Set_Target_IO_Voltage | value
   pst.Str(String(CR, LF, "Current target I/O voltage: "))
   Display_Target_IO_Voltage
 
-  pst.Str(String(CR, LF, "Enter new target I/O voltage (1.2 - 3.3, 0 for off): "))
+  pst.Str(String(CR, LF, "Enter new target I/O voltage (1.4 - 3.3, 0 for off): "))
   value := Get_Decimal_Pin  ' Receive decimal value (including 0)
 
   ' Allow whole numbers (for example, if the user entered "2", assume they meant "2.0")
@@ -1801,11 +1918,11 @@ PRI Set_Target_IO_Voltage | value
     vTargetIO := -1
     DACOutput(0)               ' DAC output off 
     pst.Str(String(CR, LF, "Target I/O voltage off."))
-  elseif (value < 12) or (value > 33)
+  elseif (value < 14) or (value > 33)
     pst.Str(@ErrOutOfRange)
   else
     vTargetIO := value
-    DACOutput(VoltageTable[vTargetIO - 12])    ' Look up value that corresponds to the actual desired voltage and set DAC output
+    DACOutput(VoltageTable[vTargetIO - 14])    ' Look up value that corresponds to the actual desired voltage and set DAC output
     pst.Str(String(CR, LF, "New target I/O voltage set: "))
     Display_Target_IO_Voltage                  ' Print a confirmation of newly set voltage
     pst.Str(String(CR, LF, "Ensure VADJ is NOT connected to target!"))
@@ -1962,7 +2079,7 @@ PRI Display_Target_IO_Voltage
   if (vTargetIO == -1)
     pst.Str(String("Undefined"))
   else
-    pst.Dec(vTargetIO / 10)      ' Display vTargetIO as an x.y value
+    pst.Dec(vTargetIO / 10)         ' Display vTargetIO as an x.y value
     pst.Char(".")
     pst.Dec(vTargetIO // 10)
 
@@ -1988,13 +2105,14 @@ PRI Display_Binary(data, len) | mod, count
 
 
 PRI Display_Permutations(n, r) | value, i
-{{  http://www.mathsisfun.com/combinatorics/combinations-permutations-calculator.html
+{
+    http://www.mathsisfun.com/combinatorics/combinations-permutations-calculator.html
 
     Order important, no repetition
     Total pins (n)
     Number of pins needed (r)
     Number of permutations: n! / (n-r)!
-}}
+}
   pst.Str(String(CR, LF, "Possible permutations: "))
 
   ' Thanks to Rednaxela of #tymkrs for the optimized calculation
@@ -2004,67 +2122,6 @@ PRI Display_Permutations(n, r) | value, i
       value *= i    
 
   pst.Dec(value)
-
-
-PRI hex2dec(p_str, n) | c, value
-{{ jm_strings.spin (Miscellaneous string methods) by Jon "JonnyMac" McPhalen }}
-
-'' Returns value from {indicated} hex string
-'' -- p_str is pointer to binary string
-'' -- n is maximum number of digits to process
-
-  if (n < 1)                                                     ' if bogus, bail out
-    return 0
-
-  repeat
-    c := upper(byte[p_str])
-    case c
-      " ":                                                       ' skip leading space(s)
-        p_str++
-
-      "$":                                                       ' found indicator
-        p_str++                                                  '  move to value
-        quit
-
-      "0".."9", "A".."F":                                        ' found value
-        quit
-
-      other:                                                     ' abort on bad character
-        return 0
-
-  value := 0
-
-  n <#= 8                                                        ' limit field width
-
-  repeat while (n)
-    c := upper(byte[p_str++])
-    case c
-      "0".."9":                                                  ' digit?
-        value := (value << 4) | (c - "0")                        '  update value
-        --n                                                      '  dec digits count
-
-      "A".."F":                                                  ' hex digit?
-        value := (value << 4) | (c - "A" + 10)
-        --n
-
-      "_":
-        { skip }
-
-      other:
-        quit
-
-  return value
-
-  
-pub upper(c)
-
-'' Convert c to uppercase
-'' -- does not modify non-alphas
-
-  if ((c => "a") and (c =< "z"))
-    c -= 32
-
-  return c
   
                            
 DAT
@@ -2091,9 +2148,10 @@ VersionInfo   byte CR, LF, "JTAGulator FW 1.7 (in progress)", CR, LF
 MenuMain      byte CR, LF, "Target Interfaces:", CR, LF
               byte "J   JTAG/IEEE 1149.1", CR, LF
               byte "U   UART/Asynchronous Serial", CR, LF
-              byte "G   GPIO", CR, LF, LF
+              byte "G   GPIO", CR, LF
+              byte "S   SWD", CR, LF, LF
               byte "General Commands:", CR, LF
-              byte "V   Set target I/O voltage (1.2V to 3.3V)", CR, LF
+              byte "V   Set target I/O voltage", CR, LF
               byte "I   Display version information", CR, LF
               byte "H   Display available commands", 0
               
@@ -2103,7 +2161,6 @@ MenuJTAG      byte CR, LF, "JTAG Commands:", CR, LF
               byte "D   Get Device ID(s)", CR, LF
               byte "T   Test BYPASS (TDI to TDO)", CR, LF
               byte "Y   Instruction/Data Register (IR/DR) discovery", CR, LF
-              byte "X   Transfer instruction/data", CR, LF
               byte "C   Set JTAG clock speed", 0
 
 MenuUART      byte CR, LF, "UART Commands:", CR, LF
@@ -2116,8 +2173,13 @@ MenuGPIO      byte CR, LF, "GPIO Commands:", CR, LF
               byte "C   Read all channels (input, continuous)", CR, LF  
               byte "W   Write all channels (output)", 0
                           
+MenuSWD       byte CR, LF, "SWD Commands:", CR, LF
+              byte "I   Identify SWD pinout (IDCODE Scan)", CR, LF
+              byte "D   Get Device ID", CR, LF
+              byte "C   Set SWD clock speed", 0
+
 MenuShared    byte CR, LF, LF, "General Commands:", CR, LF
-              byte "V   Set target I/O voltage (1.2V to 3.3V)", CR, LF
+              byte "V   Set target I/O voltage", CR, LF
               byte "H   Display available commands", CR, LF
               byte "M   Return to main menu", 0
 
@@ -2126,6 +2188,8 @@ CharProgress  byte "-", 0   ' Character used for progress indicator
 ' Any messages repeated more than once are placed here to save space
 MsgPressSpacebarToBegin     byte CR, LF, "Press spacebar to begin (any other key to abort)...", 0 
 MsgJTAGulating              byte CR, LF, "JTAGulating! Press any key to abort...", CR, LF, 0
+MsgIDCODEComplete           byte CR, LF, "IDCODE scan complete.", 0
+MsgIDCODEDisplayComplete    byte CR, LF, "IDCODE listing complete.", 0
 
 UARTPinoutMessage           byte CR, LF, "UART pin naming is from the target's perspective.", 0
 
@@ -2138,10 +2202,11 @@ ErrBYPASSAborted            byte CR, LF, "BYPASS scan aborted!", 0
 ErrDiscoveryAborted         byte CR, LF, "IR/DR discovery aborted!", 0
 ErrUARTAborted              byte CR, LF, "UART scan aborted!", 0
                                                                
-' Look-up table to correlate actual I/O voltage (1.2V to 3.3V) to DAC value
+' Look-up table to correlate actual I/O voltage to DAC value
 ' Full DAC range is 0 to 3.3V @ 256 steps = 12.89mV/step
-'                  1.2  1.3  1.4  1.5  1.6  1.7  1.8  1.9  2.0  2.1  2.2  2.3  2.4  2.5  2.6  2.7  2.8  2.9  3.0  3.1  3.2  3.3           
-VoltageTable  byte  93, 101, 109, 116, 124, 132, 140, 147, 155, 163, 171, 179, 186, 194, 202, 210, 217, 225, 233, 241, 248, 255
+' TXS0108E level translator is limited from 1.4V to 3.3V per data sheet table 6.3
+'                   1.4  1.5  1.6  1.7  1.8  1.9  2.0  2.1  2.2  2.3  2.4  2.5  2.6  2.7  2.8  2.9  3.0  3.1  3.2  3.3           
+VoltageTable  byte  109, 116, 124, 132, 140, 147, 155, 163, 171, 179, 186, 194, 202, 210, 217, 225, 233, 241, 248, 255
 
 ' Look-up table of accepted values for use with UART identification
 BaudRate      long  300, 600, 1200, 1800, 2400, 3600, 4800, 7200, 9600, 14400, 19200, 28800, 31250 {MIDI}, 38400, 57600, 76800, 115200, 153600, 230400, 250000 {DMX}, 307200
