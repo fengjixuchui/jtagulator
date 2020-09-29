@@ -1,12 +1,21 @@
 JTAGulator Change Log
 =====================
 
-Visit the JTAGulator [github repository](https://github.com/grandideastudio/jtagulator/commits/master) for full commit comments.
+Visit the JTAGulator [GitHub repository](https://github.com/grandideastudio/jtagulator/commits/master) for full commit comments.
+
+
+1.8
+---
+Release date: **xx**
+
+* GPIO: Added logic analyzer support (`L`) for use with [sigrok](https://sigrok.org), a cross-platform, open source signal analysis software suite. The JTAGulator emulates an Open Logic Sniffer (OLS) [SUMP-compatible](http://dangerousprototypes.com/docs/The_Logic_Sniffer%27s_extended_SUMP_protocol) device and provides a 1024 x 24-channel sample buffer, 1.2MHz maximum sampling rate, and logic level triggering. See operational details on the [Wiki](https://github.com/grandideastudio/jtagulator/wiki/Logic-Analyzer) (thanks to BenGardiner)
 
 
 1.7
 ---
-Release date: **xx**
+Release date: **June 17, 2020**
+
+* SWD: Added support for ARM Serial Wire Debug (SWD). There are compatibility issues with many SWD-based targets and JTAGulator Rev. B and earlier hardware, which affect signal levels and detection results. See discussion in [Pull Request #30](https://github.com/grandideastudio/jtagulator/pull/30) (thanks to adamgreen). 
 
 * UART: Increased user string input size for `UART_Scan` to 16 bytes for both ASCII and hexadecimal input. [Issue #34](https://github.com/grandideastudio/jtagulator/issues/34)
 
