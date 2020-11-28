@@ -4,18 +4,58 @@ JTAGulator Change Log
 Visit the JTAGulator [GitHub repository](https://github.com/grandideastudio/jtagulator/commits/master) for full commit comments.
 
 
-1.8
----
+<a id="v1_10"></a>1.10
+----
 Release date: **xx**
 
-* GPIO: Added logic analyzer support (`L`) for use with [sigrok](https://sigrok.org), a cross-platform, open source signal analysis software suite. The JTAGulator emulates an Open Logic Sniffer (OLS) [SUMP-compatible](http://dangerousprototypes.com/docs/The_Logic_Sniffer%27s_extended_SUMP_protocol) device and provides a 1024 x 24-channel sample buffer, 1.2MHz maximum sampling rate, and logic level triggering. See operational details on the [Wiki](https://github.com/grandideastudio/jtagulator/wiki/Logic-Analyzer) (thanks to BenGardiner)
+* UART: Upgraded `UART_Scan_TXD` to continuously monitor for target signals and automatically calculate their baud rates instead of iterating through a fixed set. This significantly decreases scan time, increases the detectable baud rate to > 1.5M, and can identify targets that implement non-standard or fluctuating baud rates, either intentionally or through unintentional timing errors (thanks to kbembedded and BenGardiner).
+
+* UART: Added support during `UART_Scan` to accept known pins, if any. This can reduce search time, especially if `UART_Scan_TXD` was done first to identify TXD.
+
+* UART: Added support during `UART_Scan` for a user-configurable delay between sending the text string and checking for a response from the target.
+
+* UART: Fixed bug that prevented `UART_Scan` from proceeding if a target was continually transmitting data. This fix may result in more responses for a given pin permutation.
+
+* JTAG: Added RTCK Scan (`R`) for [adaptive clocking](https://developer.arm.com/documentation/dui0517/h/rvi-debug-unit-system-design-guidelines/using-adaptive-clocking-to-synchronize-the-jtag-port?lang=en) discovery. RTCK (return test clock) is implemented by synthesizable CPU cores that need to synchronize an external JTAG hardware adapter's test clock (TCK) with their own internal core clock (thanks to Bryan Angelo).
+
+* JTAG: Fixed JTAG Scan (`J`) to check for nTRST even if TDI is connected to channel 0.
+
+* JTAG: Fixed OpenOCD mode (`O`) to ensure the JTAGulator's LED turns back to RED when the OpenOCD software is closed.
+ 
+* General: Minor code modifications and cleanup.
 
 
-1.7
+<a id="v1_9"></a>1.9
+---
+Release date: **October 21, 2020**
+
+* JTAG: Added support (`O`) to interface directly with [OpenOCD](http://openocd.org/), a cross-platform, open source software tool that provides on-chip debugging, in-system programming, and boundary-scan testing for embedded target devices. The JTAGulator emulates the binary protocol used by the [Bus Pirate](http://dangerousprototypes.com/docs/Bus_Pirate#JTAG). This mode persists through JTAGulator resets, power cycles, and firmware updates. It can only be exited manually by the user. See operational details on the [Wiki](https://github.com/grandideastudio/jtagulator/wiki/OpenOCD) (thanks to BenGardiner).
+
+* JTAG: Fixed low-level JTAG routines (`PropJTAG`) to sample TDO after TCK rising edge (not before) to properly conform to the IEEE 1149.1 specification.
+
+* JTAG: Removed adjustable clock speed functionality (`C`). JTAG clock operates at 25kHz maximum.
+
+* SWD: Removed adjustable clock speed functionality (`C`). SWD clock defaults to 100kHz. Can be manually adjusted in `SWD_Init` from 1 to 300kHz.
+
+* General: Minor code cleanup and optimizations.
+
+
+<a id="v1_8"></a>1.8
+---
+Release date: **October 6, 2020**
+
+* JTAG: Added JTAG Scan (`J`), which combines IDCODE Scan and BYPASS Scan functionality into a single command. If a valid IDCODE is received during enumeration, the remaining channels will be checked for TDI. This can greatly reduce search time and will return all required JTAG pins for the detected target.
+
+* GPIO: Added logic analyzer support (`L`) for use with [sigrok](https://sigrok.org), a cross-platform, open source signal analysis software suite. The JTAGulator emulates an Open Logic Sniffer (OLS) [SUMP-compatible](http://dangerousprototypes.com/docs/The_Logic_Sniffer%27s_extended_SUMP_protocol) device and provides a 1024 x 24-channel sample buffer, 1.2MHz maximum sampling rate, and logic level triggering. This mode persists through JTAGulator resets, power cycles, and firmware updates. It can only be exited manually by the user. See operational details on the [Wiki](https://github.com/grandideastudio/jtagulator/wiki/Logic-Analyzer) (thanks to BenGardiner).
+
+* General: Minor code cleanup and optimizations.
+
+
+<a id="v1_7"></a>1.7
 ---
 Release date: **June 17, 2020**
 
-* SWD: Added support for ARM Serial Wire Debug (SWD). There are compatibility issues with many SWD-based targets and JTAGulator Rev. B and earlier hardware, which affect signal levels and detection results. See discussion in [Pull Request #30](https://github.com/grandideastudio/jtagulator/pull/30) (thanks to adamgreen). 
+* SWD: Added support for detecting [ARM Serial Wire Debug (SWD)](https://developer.arm.com/architectures/cpu-architecture/debug-visibility-and-trace/coresight-architecture/serial-wire-debug) interfaces. There are compatibility issues with many SWD-based targets and JTAGulator Rev. B and earlier hardware, which affect signal levels and detection results. See discussion in [Pull Request #30](https://github.com/grandideastudio/jtagulator/pull/30) (thanks to adamgreen). 
 
 * UART: Increased user string input size for `UART_Scan` to 16 bytes for both ASCII and hexadecimal input. [Issue #34](https://github.com/grandideastudio/jtagulator/issues/34)
 
@@ -32,7 +72,7 @@ Release date: **June 17, 2020**
 * General: Minor code optimizations.
 
 
-1.6
+<a id="v1_6"></a>1.6
 ---
 Release date: **August 9, 2018**
 
@@ -49,7 +89,7 @@ Release date: **August 9, 2018**
 * Release for [Black Hat USA 2018 Tools Arsenal](https://www.blackhat.com/us-18/arsenal.html).
 
 
-1.5
+<a id="v1_5"></a>1.5
 ---
 Release date: **March 12, 2018**
 
@@ -70,7 +110,7 @@ Release date: **March 12, 2018**
 * General: Added .travis.yml script for use with Travis CI, which provides continuous integration/build of the JTAGulator code base using PropellerIDE and openspin (thanks to stephengroat).
 
 
-1.4
+<a id="v1_4"></a>1.4
 ---
 Release date: **November 3, 2016**
 
@@ -99,7 +139,7 @@ Release date: **November 3, 2016**
 * Release for [Black Hat Europe 2016 Tools Arsenal](https://www.blackhat.com/eu-16/arsenal.html).
 
 
-1.3
+<a id="v1_3"></a>1.3
 ---
 Release date: **December 25, 2015**
 
@@ -124,14 +164,14 @@ Release date: **December 25, 2015**
 * General: Minor code cleanup and text updates.
 
 
-1.2.2
+<a id="v1_2_2"></a>1.2.2
 -----
 Release date: **September 20, 2014**
 
 * Modified `Set_Target_IO_Voltage` to print a confirmation of the newly set voltage (thanks to Crypt) and to print a warning that the user should NOT connect VADJ to the target (VADJ is used for level-shifting JTAGulator's I/O to match the target's I/O, NOT to externally power the target).
 
 
-1.2.1
+<a id="v1_2_1"></a>1.2.1
 -----
 Release date: **September 8, 2014**
 
@@ -140,13 +180,13 @@ Release date: **September 8, 2014**
 * Minor code cleanup.
 
 
-1.2
+<a id="v1_2"></a>1.2
 ---
 Release date: **August 7, 2014**
 
 * Added support for detecting the optional JTAG nTRST pin. This pin is often pulled low on target systems, which will intentionally disable the JTAG interface. If it isn't one of the pins connected to the JTAGulator, the interface might not be discovered.
 
-* Fixed/modified JTAG routines to more closely conform to the IEEE 1149.1 specification (thanks to Bryan Angelo @ Qualcomm).
+* Fixed/modified JTAG routines to more closely conform to the IEEE 1149.1 specification (thanks to Bryan Angelo).
 
 * Added extended IDCODE decoding based on IEEE 1149.1 specification for easier/quicker identification of manufacturer, part number, and version (thanks to Bob Heinemann).
 
@@ -167,14 +207,14 @@ Release date: **August 7, 2014**
 * Release for [Black Hat USA 2014 Tools Arsenal](https://www.blackhat.com/us-14/arsenal.html).
 
 
-1.1.1
+<a id="v1_1_1"></a>1.1.1
 -----
 Release date: **August 6, 2013**
 
 * Modifed `UART_Scan` and `UART_Passthrough` to stop the UART cog (`jdcogserial`) at the end of their functions. This prevents the cog from maintaining control of the pins, which would prevent subsequent, non-UART commands from working.
 
 
-1.1
+<a id="v1_1"></a>1.1
 ---
 Release date: **August 1, 2013**
 
@@ -189,7 +229,7 @@ Release date: **August 1, 2013**
 * Release for [Black Hat USA 2013](https://www.blackhat.com/us-13/).
 
 
-1.0.1
+<a id="v1_0_1"></a>1.0.1
 -----
 Release date: **June 11, 2013**
 
@@ -198,7 +238,7 @@ Release date: **June 11, 2013**
 * Minor code cleanup.
 
 
-1.0
+<a id="v1_0"></a>1.0
 ---
 Release date: **April 24, 2013**
 

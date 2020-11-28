@@ -131,7 +131,7 @@ VAR 'This is a struct used by the sampler cog; its layout and the offsets above 
 
   long samplerRunning
 
-  long sampleBuffer[MAX_SAMPLE_PERIODS]
+  long sampleBuffer        ' Address of global buffer from top object
 
   
 OBJ
@@ -140,7 +140,7 @@ OBJ
   
 
 PRI Start    ' Start a new cog to run PASM routine 
-  Stop                                           ' Call the Stop function, just in case the calling object called Start two times in a row  
+  Stop                                           ' Call the Stop function, just in case the calling object called Start two times in a row
   Cog := cognew(@samplerInit, @clocksWait) + 1   ' Launch the cog with a pointer to the parameters
   if Cog =< 0    ' Failed to start SUMP sampler
     repeat  ' Repeat until system reset
@@ -157,8 +157,10 @@ PRI Stop
     Cog := 0
     
 
-PUB Go | coggood, i, isSendSamples
+PUB Go(bufPtr) | coggood, i, isSendSamples
   pst.Start(RxPin, TxPin, BaudRate)  ' Configure UART
+
+  sampleBuffer := bufPtr
 
   clocksWait:=DEFAULT_CLOCKS_WAIT
   readPeriods:=DEFAULT_READ_PERIODS 
@@ -219,17 +221,24 @@ PUB Go | coggood, i, isSendSamples
         u.LEDYellow
         i:=0
         repeat while i < MAX_SAMPLE_PERIODS ' Clear buffer before starting capture
-          sampleBuffer[i++]:=$00000000
+          long[sampleBuffer][i++]:=$00000000
 
         samplerRunning:=1                   ' Arm the sampler cog
         isSendSamples:=1                    ' Send samples after successful capture
         repeat until (samplerRunning == 0)  ' Wait for the sampler cog to finish
           vCmd[0]:=pst.RxCheck                ' Check if byte is sent from client during capture
-          if (vCmd[0] == CMD_RESET)
-            isSendSamples:=0
-            samplerRunning:=0
-            Stop                                  ' Stop sampler cog
-            Start                                 ' Restart sampler cog
+
+          case vCmd[0]
+            CAN:          ' If Ctrl-X (CAN) character received, exit SUMP mode
+              Stop          ' Stop sampler cog
+              pst.Stop      ' Stop serial communications
+              return        ' Go back to main JTAGulator mode
+
+            CMD_RESET:    ' If user canceled before trigger or acquisition is complete
+              isSendSamples:=0
+              samplerRunning:=0
+              Stop          ' Stop sampler cog
+              Start         ' Restart sampler cog
 
         if isSendSamples
           SendAllSamples
@@ -417,7 +426,7 @@ PRI GetFourMoreParamBytes : val
 PRI SendAllSamples | i   'NB: OLS sends samples in reverse
   i := 0
   repeat while i < readPeriods
-    SendSamples(sampleBuffer[delayPeriods - 1 - i])
+    SendSamples(long[sampleBuffer][delayPeriods - 1 - i])
     ++i
 
     
@@ -476,7 +485,8 @@ samplerOff              RDLONG  t1,                 samplerRunningA     WZ
 samplerArm              MOVS    samplerTramp,       #samplerArmed1
 
                         MOV     samplerTargetA,     PAR                     
-                        ADD     samplerTargetA,     #SAMPLEBUFFER_OFF    ' point to the beginning of sampleBuffer
+                        ADD     samplerTargetA,     #SAMPLEBUFFER_OFF  
+                        RDLONG  samplerTargetA,     samplerTargetA       ' point to the beginning of sampleBuffer
                         
                         MOV     t1,                 PAR
                         ADD     t1,                 #DELAYPERIODS_OFF
